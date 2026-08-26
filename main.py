@@ -1,22 +1,28 @@
 import os
 import requests
+import uvicorn
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 
-# Configuration
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 DEFAULT_CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID")
-PORT = int(os.getenv("PORT", "8000"))
+PORT = int(os.getenv("PORT", "10000"))
 
 
-# MCP Server
-mcp = FastMCP("YouTube Live Data Analyzer")
+security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=False
+)
+
+mcp = FastMCP(
+    "YouTube Live Data Analyzer",
+    transport_security=security
+)
 
 
-# Health check
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request):
     return JSONResponse({
@@ -25,10 +31,11 @@ async def health_check(request: Request):
     })
 
 
-# YouTube API request helper
 def youtube_get(endpoint, params):
     if not YOUTUBE_API_KEY:
-        raise RuntimeError("YOUTUBE_API_KEY is not configured.")
+        raise RuntimeError(
+            "YOUTUBE_API_KEY is not configured."
+        )
 
     params["key"] = YOUTUBE_API_KEY
 
@@ -45,7 +52,6 @@ def youtube_get(endpoint, params):
     return response.json()
 
 
-# Get channel information
 def get_channel_info(channel_id):
     data = youtube_get(
         "channels",
@@ -63,25 +69,24 @@ def get_channel_info(channel_id):
         )
 
     channel = items[0]
+    statistics = channel.get("statistics", {})
 
     return {
         "channel_id": channel["id"],
         "channel_title": channel["snippet"]["title"],
         "subscribers": int(
-            channel["statistics"].get("subscriberCount", 0)
+            statistics.get("subscriberCount", 0)
         ),
         "total_views": int(
-            channel["statistics"].get("viewCount", 0)
+            statistics.get("viewCount", 0)
         ),
         "total_videos": int(
-            channel["statistics"].get("videoCount", 0)
+            statistics.get("videoCount", 0)
         )
     }
 
 
-# Find current live stream
 def find_live_video(channel_id):
-
     data = youtube_get(
         "search",
         {
@@ -101,13 +106,15 @@ def find_live_video(channel_id):
     return items[0]["id"]["videoId"]
 
 
-# Get live video information
 def get_live_video_info(video_id):
-
     data = youtube_get(
         "videos",
         {
-            "part": "snippet,statistics,liveStreamingDetails",
+            "part": (
+                "snippet,"
+                "statistics,"
+                "liveStreamingDetails"
+            ),
             "id": video_id
         }
     )
@@ -132,55 +139,41 @@ def get_live_video_info(video_id):
         "title": video["snippet"].get("title"),
         "channel_id": video["snippet"].get("channelId"),
         "channel_title": video["snippet"].get("channelTitle"),
-
         "view_count": int(
             statistics.get("viewCount", 0)
         ),
-
         "like_count": int(
             statistics.get("likeCount", 0)
         ),
-
         "comment_count": int(
             statistics.get("commentCount", 0)
         ),
-
         "concurrent_viewers": int(
-            live_details.get(
-                "concurrentViewers",
-                0
-            )
+            live_details.get("concurrentViewers", 0)
         ),
-
         "scheduled_start_time": live_details.get(
             "scheduledStartTime"
         ),
-
         "actual_start_time": live_details.get(
             "actualStartTime"
         ),
-
         "actual_end_time": live_details.get(
             "actualEndTime"
         )
     }
 
 
-# Main MCP tool
 @mcp.tool()
 def get_youtube_live_data(
     channel_id: str = "",
     video_id: str = ""
 ) -> dict:
-    """
-    Get YouTube channel and current live stream data.
-    """
 
     try:
-
         channel_id = (
             channel_id.strip()
             or DEFAULT_CHANNEL_ID
+            or ""
         )
 
         if not channel_id:
@@ -189,10 +182,8 @@ def get_youtube_live_data(
                 "error": "No YouTube channel ID provided."
             }
 
-        # Get channel data
         channel = get_channel_info(channel_id)
 
-        # Find live stream
         if video_id.strip():
             current_video_id = video_id.strip()
         else:
@@ -200,7 +191,6 @@ def get_youtube_live_data(
                 channel_id
             )
 
-        # No live stream
         if not current_video_id:
             return {
                 "success": True,
@@ -209,7 +199,6 @@ def get_youtube_live_data(
                 "channel": channel
             }
 
-        # Get live stream data
         live_video = get_live_video_info(
             current_video_id
         )
@@ -222,23 +211,27 @@ def get_youtube_live_data(
         }
 
     except requests.exceptions.RequestException as e:
-
         return {
             "success": False,
             "error": f"YouTube API request failed: {str(e)}"
         }
 
     except Exception as e:
-
         return {
             "success": False,
             "error": str(e)
         }
 
 
-# Start server
+app = mcp.streamable_http_app()
+
+
 if __name__ == "__main__":
-    mcp.run(
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=PORT
+    )
         transport="streamable-http",
         host="0.0.0.0",
         port=PORT
